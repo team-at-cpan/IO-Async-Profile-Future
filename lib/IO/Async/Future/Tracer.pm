@@ -1,4 +1,4 @@
-package IO::Async::Profile::Future;
+package IO::Async::Future::Profile;
 # ABSTRACT: 
 use strict;
 use warnings;
@@ -17,68 +17,58 @@ IO::Async::Future::Profile -
 
 =cut
 
+use IO::Async::Future::Profile::Watcher;
 use IO::Async::Timer::Periodic;
-use curry::weak;
-use List::UtilsBy qw(nsort_by);
 
 =head1 METHODS
 
 =cut
 
-sub future_created_event {
-	my ($self, $ev, $f) = @_;
-	$self->debug_printf("create: %s", $self->describe($f));
-}
+sub watcher {
+	shift->{watcher} ||= Future::Debug->create_watcher(
+		create => sub {
+			my $class = __PACKAGE__;
+			my ($ev, $f) = @_;
+			say "create: " . $class->describe($f);
+		},
+		on_ready => sub {
+			my $class = __PACKAGE__;
+			my ($ev, $f) = @_;
+			my $elapsed = 1000.0 * (Time::HiRes::time - $f->created);
+			$f->elapsed($elapsed);
+			say "ready:  " . $class->describe($f);
+		},
+		destroy => sub {
+			my $class = __PACKAGE__;
+			my ($ev, $f) = @_;
+			my $elapsed = 1000.0 * (Time::HiRes::time - $f->created);
+			$f->elapsed($elapsed) unless $f->is_ready;
 
-sub future_ready_event {
- 	my $self = shift;
-	my ($ev, $f) = @_;
-	my $elapsed = 1000.0 * (Time::HiRes::time - $f->created);
-	$f->elapsed($elapsed);
-	$self->debug_printf("ready: %s", $self->describe($f));
-}
-sub future_destroy_event {
-	my $self = shift;
-	my ($ev, $f) = @_;
-	my $elapsed = 1000.0 * (Time::HiRes::time - $f->created);
-	$f->elapsed($elapsed) unless $f->is_ready;
-
-	my $description = $self->describe($f);
-	$self->debug_printf("drop: %s", $description);
-	unshift @{$self->old_futures}, $description;
-	splice @{$self->old_futures}, 100;
-}
-
-sub create_watcher {
-	my $self = shift;
-	$self->{watcher} ||= IO::Async::Future::Profile::Patch->create_watcher(
-		create => $self->curry::weak::future_created_event,
-		on_ready => $self->curry::weak::future_ready_event,
-		destroy => $self->curry::weak::future_destroy_event,
+			my $description = $class->describe($f);
+			say "drop:   $description";
+			unshift @{$self->old_futures}, $description;
+			splice @{$self->old_futures}, 100;
+		}
 	);
 }
 
 sub old_futures { shift->{old_futures} ||= [] }
 
-sub timer_event {
-	my $self = shift;
-	$self->debug_printf("All futures, from oldest to newest");
-	for my $f (nsort_by { $_->created } IO::Async::Future::Profile::Patch->futures) {
-		$self->debug_printf("* %s", $self->describe($f));
-	}
-	$self->debug_printf("Last 100 futures");
-	for my $f (@{$self->old_futures}) {
-		$self->debug_printf("* %s", $f);
-	}
-}
-
-sub timer_interval { 1 }
-
 sub timer {
-	my $self = shift;
-	$self->{timer} ||= IO::Async::Timer::Periodic->new(
-		interval => $self->timer_interval,
-		on_tick => $self->curry::weak::timer_event,
+	shift->{timer} ||= IO::Async::Timer::Periodic->new(
+		interval => 1,
+		on_tick => sub {
+			my $class = __PACKAGE__;
+			say "--";
+			print "All futures, from oldest to newest:\n";
+			for my $f (List::UtilsBy::nsort_by { $_->created } Future::Debug->futures) {
+				print "* " . $class->describe($f) . "\n";
+			}
+			print "Last 100 futures\n";
+			for my $f (@{$self->old_futures}) {
+				print "* $f\n";
+			}
+		}
 	)
 }
 sub _add_to_loop {
@@ -100,7 +90,7 @@ sub describe {
 }
 
 {
-package
+package \
 	IO::Async::Future::Profile::Patch;
 use Future;
 use Time::HiRes ();
@@ -114,13 +104,13 @@ our @WATCHERS;
 
 =head1 create_watcher
 
-Returns a new watcher instance.
+Returns a new L<Future::Tracer::Watcher>.
 
 =cut
 
 sub create_watcher {
-	my $self = shift;
-	push @WATCHERS, my $w = IO::Async::Future::Profile::Watcher->new;
+	my $class = shift;
+	push @watchers, my $w = Future::Watcher->new;
 	$w->subscribe_to_event(@_) if @_;
 	# explicit discard
 #	Scalar::Util::weaken $watchers[-1];
@@ -136,7 +126,7 @@ Deletes the given watcher.
 sub delete_watcher {
 	my ($class, $w) = @_;
 	$w = Scalar::Util::refaddr $w;
-	List::UtilsBy::extract_by { Scalar::Util::refaddr($_) eq $w } @WATCHERS;
+	List::UtilsBy::extract_by { Scalar::Util::refaddr($_) eq $w } @watchers;
 	()
 }
 
@@ -146,7 +136,7 @@ Returns all the Futures we know about.
 
 =cut
 
-sub futures { grep defined, map $_->{future}, sort values %FUTURE_MAP }
+sub futures { grep defined, map $_->{future}, sort values %fm }
 
 sub Future::label {
 	my $f = shift;
@@ -169,16 +159,16 @@ sub Future::elapsed {
 sub Future::DESTROY {
 	my $f = shift;
 	# my $f = $destructor->(@_);
-	my $entry = delete $FUTURE_MAP{$f};
-	$_->invoke_event(destroy => $f) for grep defined, @WATCHERS;
+	my $entry = delete $fm{$f};
+	$_->invoke_event(destroy => $f) for grep defined, @watchers;
 	$f
 }
 
 BEGIN {
 	my $prep = sub {
 		my $f = shift;
-		if(exists $FUTURE_MAP{$f}) {
-			$FUTURE_MAP{$f}{type} = (exists $f->{subs} ? 'dependent' : 'leaf');
+		if(exists $fm{$f}) {
+			$fm{$f}{type} = (exists $f->{subs} ? 'dependent' : 'leaf');
 			return $f;
 		}
 		$f->{constructed_at} = do {
@@ -195,13 +185,13 @@ BEGIN {
 			],
 		};
 		Scalar::Util::weaken($entry->{future});
-		$FUTURE_MAP{$f} = $entry;
+		$fm{$f} = $entry;
 		$f->label('unknown')->created(0);
 		my $name = "$f";
 		$f->on_ready(sub {
 			my $f = shift;
 			# cluck "here -> $f";
-			$_->invoke_event(on_ready => $f) for grep defined, @WATCHERS;
+			$_->invoke_event(on_ready => $f) for grep defined, @watchers;
 		});
 	};
 
@@ -211,7 +201,7 @@ BEGIN {
 			sub {
 				my $f = $constructor->(@_);
 				$prep->($f);
-				$_->invoke_event(create => $f) for grep defined, @WATCHERS;
+				$_->invoke_event(create => $f) for grep defined, @watchers;
 				$f
 			};
 		},
@@ -221,14 +211,14 @@ BEGIN {
 				my @subs = @{$_[1]};
 				my $f = $constructor->(@_);
 				$prep->($f);
-				my $entry = $FUTURE_MAP{$f};
+				my $entry = $fm{$f};
 				# Inform subs that they have a new parent
 				for(@subs) {
-					die "missing fm for $_?" unless exists $FUTURE_MAP{$_};
-					push @{$FUTURE_MAP{$_}{dependents}}, $f;
-					Scalar::Util::weaken($FUTURE_MAP{$_}{dependents}[-1]);
+					die "missing fm for $_?" unless exists $fm{$_};
+					push @{$fm{$_}{dependents}}, $f;
+					Scalar::Util::weaken($fm{$_}{dependents}[-1]);
 				}
-				$_->invoke_event(create => $f) for grep defined, @WATCHERS;
+				$_->invoke_event(create => $f) for grep defined, @watchers;
 				$f
 			};
 		},
@@ -244,22 +234,6 @@ BEGIN {
 		}
 	}
 }
-}
-{
-package
-	IO::Async::Future::Profile::Watcher;
-
-use strict;
-use warnings;
-use parent qw(Mixin::Event::Dispatch);
-
-sub new { my $class = shift; bless { @_ }, $class }
-
-sub discard {
-	my $self = shift;
-	IO::Async::Future::Profile::Patch->delete_watcher($self)
-}
-
 }
 
 1;
